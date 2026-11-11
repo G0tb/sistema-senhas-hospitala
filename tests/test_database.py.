@@ -1,0 +1,53 @@
+from __future__ import annotations
+
+import sqlite3
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from database.connection import Database
+from database.models import Especialidade, Profissional, Senha, TipoSenha, Prioridade
+from database.repositories import EspecialidadeRepository, ProfissionalRepository, SenhaRepository
+
+
+def main() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        with Database(Path(temp) / "test.db") as database:
+            connection = database.connection
+            tables = {row["name"] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            expected = {"especialidades", "consultorios", "profissionais", "senhas", "atendimentos", "usuarios", "configuracoes"}
+            assert expected <= tables
+            assert len(EspecialidadeRepository(connection).list()) == 6
+            assert len(connection.execute("SELECT * FROM consultorios").fetchall()) == 18
+
+            especialidade = EspecialidadeRepository(connection).create(Especialidade(nome="Teste", codigo="TST"))
+            profissionais = ProfissionalRepository(connection)
+            for index in range(3):
+                profissionais.create(Profissional(nome=f"Profissional {index}", registro=f"REG-{index}", especialidade_id=especialidade.id, consultorio_id=index + 1))
+            try:
+                profissionais.create(Profissional(nome="Quarto", registro="REG-4", especialidade_id=especialidade.id, consultorio_id=4))
+            except ValueError as exc:
+                assert "3" in str(exc)
+            else:
+                raise AssertionError("O quarto profissional ativo deveria ser rejeitado")
+
+            senhas = SenhaRepository(connection)
+            senhas.create(Senha.nova("TST-P-001", especialidade.id, TipoSenha.PREFERENCIAL, Prioridade.P1))
+            senhas.create(Senha.nova("TST-N-002", especialidade.id, TipoSenha.NORMAL))
+            assert [item.codigo for item in senhas.list_waiting(especialidade.id)] == ["TST-P-001", "TST-N-002"]
+
+            try:
+                connection.execute("INSERT INTO senhas (codigo, especialidade_id, tipo, prioridade, criada_em) VALUES ('ERR', ?, 'N', 'P1', 'now')", (especialidade.id,))
+            except sqlite3.IntegrityError:
+                pass
+            else:
+                raise AssertionError("A constraint de tipo/prioridade deveria ser rejeitada")
+
+    print("OK: banco, seed, fila e restrições validados.")
+
+
+if __name__ == "__main__":
+    main()
